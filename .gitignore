@@ -30,3 +30,6 @@ Thumbs.db
 
 # Build/cache
 .cache/
+
+# SentinelFlow analysis workspace
+workspace/
