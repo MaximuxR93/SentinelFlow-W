@@ -130,6 +130,7 @@ class FrameworkDetector:
             if filename == "package.json":
                 data = self._read_json(path)
                 deps = {}
+
                 for key in ("dependencies", "devDependencies", "peerDependencies"):
                     value = data.get(key, {})
                     if isinstance(value, dict):
@@ -140,6 +141,20 @@ class FrameworkDetector:
                         add(
                             name, category, "dependency", path,
                             f"package.json declares {package}"
+                        )
+
+                # Detect when the repository itself is a framework.
+                if path.parent == self.root:
+                    package_name = str(data.get("name", "")).strip().lower()
+
+                    if package_name in self.JS_FRAMEWORKS:
+                        name, category = self.JS_FRAMEWORKS[package_name]
+                        add(
+                            name,
+                            category,
+                            "package_identity",
+                            path,
+                            f"Root package.json identifies this repository as {name}"
                         )
 
                 scripts = data.get("scripts", {})
@@ -159,7 +174,7 @@ class FrameworkDetector:
                 for package, (name, category) in self.PYTHON_FRAMEWORKS.items():
                     # Match common dependency declaration forms.
                     import re
-                    pattern = rf"(?m)^\s*{re.escape(package)}\s*(?:[<>=!~\[]|$)"
+                    pattern = rf"(?m)^\\s*{re.escape(package)}\\s*(?:[<>=!~\\[]|$)"
                     if re.search(pattern, content):
                         add(
                             name, category, "dependency", path,
