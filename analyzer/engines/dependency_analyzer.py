@@ -182,8 +182,10 @@ class DependencyAnalyzer:
             "lockfile_packages": locked,
             "errors": errors,
             "metadata": {
-                "analysis_type": "manifest-and-lockfile",
-                "executed_repository_code": False,
-                "vulnerability_matching": "not-yet-implemented",
-            },
+    "analysis_type": "manifest-and-lockfile",
+    "executed_repository_code": False,
+    "vulnerability_matching": (
+        "OSV exact-version matching is performed by VulnerabilityScanner"
+    ),
+},
         }

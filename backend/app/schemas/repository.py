@@ -1,3 +1,4 @@
+from typing import Any
 from pydantic import BaseModel, HttpUrl, Field
 
 
@@ -16,3 +17,10 @@ class RepositoryMetadata(BaseModel):
     api_routes: int = 0
     docker: bool = False
     github_actions: bool = False
+
+    fingerprint: dict[str, Any] = Field(default_factory=dict)
+    framework_analysis: dict[str, Any] = Field(default_factory=dict)
+    dependency_analysis: dict[str, Any] = Field(default_factory=dict)
+    vulnerability_analysis: dict[str, Any] = Field(default_factory=dict)
+    analysis_status: str = "completed"
+    analysis_errors: list[dict[str, str]] = Field(default_factory=list)

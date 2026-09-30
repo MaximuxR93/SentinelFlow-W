@@ -94,3 +94,38 @@ def test_analyzer_collects_manifest_evidence(tmp_path):
     )
     assert react["resolved_version"] == "19.0.0"
     assert react["evidence"]["path"] == "package.json"
+
+    
+def test_parse_npm_v1_lockfile(tmp_path):
+    import json
+
+    from parsers.package_json import parse_package_lock
+
+    lockfile = tmp_path / "package-lock.json"
+    lockfile.write_text(
+        json.dumps({
+            "name": "example",
+            "lockfileVersion": 1,
+            "dependencies": {
+                "express": {
+                    "version": "4.18.2",
+                    "dependencies": {
+                        "accepts": {
+                            "version": "1.3.8"
+                        }
+                    }
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    result = parse_package_lock(lockfile)
+
+    versions = {
+        (item["name"], item["resolved_version"])
+        for item in result
+    }
+
+    assert ("express", "4.18.2") in versions
+    assert ("accepts", "1.3.8") in versions
