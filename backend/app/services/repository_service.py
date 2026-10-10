@@ -20,6 +20,9 @@ from app.schemas.repository import RepositoryMetadata
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ANALYZER_ROOT = PROJECT_ROOT / "analyzer"
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 if str(ANALYZER_ROOT) not in sys.path:
     sys.path.insert(0, str(ANALYZER_ROOT))
 
@@ -271,56 +274,102 @@ class RepositoryService:
             if path.name == "package.json"
         ]
 
+
     @classmethod
-    def _detect_package_manager(
+    def _detect_package_manager_details(
         cls,
         repository_path: Path,
-    ) -> str | None:
-        """Detect package manager from root or nested project manifests."""
+    ) -> dict[str, str | bool | None]:
+        """Detect package manager and retain the evidence used."""
         lockfile_managers = (
             ("pnpm-lock.yaml", "pnpm"),
             ("yarn.lock", "yarn"),
             ("package-lock.json", "npm"),
             ("bun.lock", "bun"),
             ("bun.lockb", "bun"),
+            ("poetry.lock", "poetry"),
         )
 
         # Prefer root lockfiles.
         for filename, manager in lockfile_managers:
             if (repository_path / filename).is_file():
-                return manager
+                return {
+                    "package_manager": manager,
+                    "package_manager_evidence": "lockfile_detected",
+                    "lockfile_found": True,
+                    "lockfile_type": filename,
+                }
 
         # Then inspect nested project lockfiles.
         for path in cls._walk_files(repository_path):
             for filename, manager in lockfile_managers:
                 if path.name == filename:
-                    return manager
+                    return {
+                        "package_manager": manager,
+                        "package_manager_evidence": "lockfile_detected",
+                        "lockfile_found": True,
+                        "lockfile_type": filename,
+                    }
 
-        # Detect Python package managers.
-        python_markers = {
-            "requirements.txt": "pip",
-            "pyproject.toml": "pip",
-            "Pipfile": "pipenv",
-            "poetry.lock": "poetry",
-        }
+        # Detect Python package managers from manifests.
+        python_markers = (
+            ("Pipfile", "pipenv"),
+            ("pyproject.toml", "pip"),
+            ("requirements.txt", "pip"),
+        )
 
         for path in cls._walk_files(repository_path):
-            if path.name in python_markers:
-                return python_markers[path.name]
+            for filename, manager in python_markers:
+                if path.name == filename:
+                    return {
+                        "package_manager": manager,
+                        "package_manager_evidence": "manifest_inferred",
+                        "lockfile_found": False,
+                        "lockfile_type": None,
+                    }
 
-        # Detect other common ecosystems.
+        # Detect Maven and Cargo from their manifests.
         for path in cls._walk_files(repository_path):
             if path.name == "pom.xml":
-                return "maven"
+                return {
+                    "package_manager": "maven",
+                    "package_manager_evidence": "manifest_inferred",
+                    "lockfile_found": False,
+                    "lockfile_type": None,
+                }
+
             if path.name == "Cargo.toml":
-                return "cargo"
+                return {
+                    "package_manager": "cargo",
+                    "package_manager_evidence": "manifest_inferred",
+                    "lockfile_found": False,
+                    "lockfile_type": None,
+                }
 
-                # Infer npm when a JavaScript package manifest exists,
-        # but no supported lockfile was found.
+        # Infer npm from package.json when no supported lockfile exists.
         if cls._find_package_manifests(repository_path):
-            return "npm"
+            return {
+                "package_manager": "npm",
+                "package_manager_evidence": "manifest_inferred",
+                "lockfile_found": False,
+                "lockfile_type": None,
+            }
 
-        return None
+        return {
+            "package_manager": None,
+            "package_manager_evidence": None,
+            "lockfile_found": False,
+            "lockfile_type": None,
+        }
+
+    @classmethod
+    def _detect_package_manager(
+        cls,
+        repository_path: Path,
+    ) -> str | None:
+        """Return only the detected package manager."""
+        details = cls._detect_package_manager_details(repository_path)
+        return details["package_manager"]
 
     @classmethod
     def _detect_database(
@@ -488,7 +537,20 @@ class RepositoryService:
         analysis_status = "completed"
 
         files = self._count_files(destination)
-        package_manager = self._detect_package_manager(destination)
+
+        package_manager_details = (
+            self._detect_package_manager_details(destination)
+        )
+
+        package_manager = package_manager_details["package_manager"]
+        package_manager_evidence = (
+            package_manager_details["package_manager_evidence"]
+        )
+        lockfile_found = package_manager_details["lockfile_found"]
+        lockfile_type = package_manager_details["lockfile_type"]
+
+        database = self._detect_database(destination)
+        package_manager = package_manager_details["package_manager"]
         database = self._detect_database(destination)
         api_routes = self._count_api_routes(destination)
         docker, github_actions = self._detect_infrastructure(
@@ -609,6 +671,9 @@ class RepositoryService:
             framework=framework,
             languages=languages,
             package_manager=package_manager,
+            package_manager_evidence=package_manager_evidence,
+            lockfile_found=lockfile_found,
+            lockfile_type=lockfile_type,
             database=database,
             files=files,
             api_routes=api_routes,
@@ -620,6 +685,7 @@ class RepositoryService:
             vulnerability_analysis=vulnerability_analysis,
             analysis_status=analysis_status,
             analysis_errors=analysis_errors,
+
         )
 
 

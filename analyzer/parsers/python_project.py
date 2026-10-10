@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import re
@@ -7,13 +6,30 @@ from pathlib import Path
 from typing import Any
 
 
+# Basic PEP 508-style requirement parsing.
+#
+# Examples:
+#   requests
+#   requests==2.31.0
+#   requests>=2.0,<3.0
+#   requests[security]>=2.0
+#   requests[security]==2.31.0
+
 _REQUIREMENT_RE = re.compile(
-    r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*"
-    r"(\[[^\]]+\])?\s*(.*)$"
+    r"^\s*"
+    r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?P<extras>\[[^\]]+\])?"
+    r"\s*"
+    r"(?P<specifier>.*)"
+    r"$"
 )
 
 
 def _normalize_name(name: str) -> str:
+    """
+    Normalize Python package names according to common
+    PyPI normalization rules.
+    """
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
@@ -36,101 +52,308 @@ def _make_dependency(
     }
 
 
-def parse_requirements(path: str | Path) -> list[dict[str, Any]]:
-    """Parse common pip requirements lines; skip options and references."""
+def _parse_requirement(
+    requirement: str,
+    source: Path,
+    dependency_type: str,
+    line_number: int | None = None,
+) -> dict[str, Any] | None:
+    """
+    Parse a single Python requirement.
+
+    Returns None for:
+    - empty requirements
+    - pip options
+    - VCS dependencies
+    - URL/direct-reference dependencies
+    - local paths
+    - unsupported requirement syntax
+    """
+
+    line = requirement.split("#", 1)[0].strip()
+
+    if not line:
+        return None
+
+    # pip options
+    if line.startswith("-"):
+        return None
+
+    # VCS / URL / direct references
+    if line.startswith(
+        (
+            "git+",
+            "hg+",
+            "svn+",
+            "bzr+",
+            "http://",
+            "https://",
+            "file://",
+        )
+    ):
+        return None
+
+    # Local / relative paths
+    if line.startswith((".", "/")):
+        return None
+
+    match = _REQUIREMENT_RE.match(line)
+
+    if not match:
+        return None
+
+    name = match.group("name")
+    extras = match.group("extras")
+    specifier = match.group("specifier").strip()
+
+    # Direct references:
+    #
+    # package @ https://example.com/package.whl
+    if " @ " in specifier or specifier.startswith("@"):
+        return None
+
+    dependency = _make_dependency(
+        name,
+        specifier,
+        source,
+        dependency_type,
+    )
+
+    dependency["extras"] = (
+        [
+            extra.strip()
+            for extra in extras[1:-1].split(",")
+            if extra.strip()
+        ]
+        if extras
+        else []
+    )
+
+    if line_number is not None:
+        dependency["evidence"]["line"] = line_number
+
+    return dependency
+
+
+def parse_requirements(
+    path: str | Path,
+) -> list[dict[str, Any]]:
+    """Parse common pip requirements lines."""
+
     source = Path(path)
-    results = []
+    results: list[dict[str, Any]] = []
 
     try:
-        lines = source.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"Unable to read {source}: {exc}") from exc
+        try:
+            # Supports UTF-8 including BOM.
+            content = source.read_text(
+                encoding="utf-8-sig"
+            )
+        except UnicodeDecodeError:
+            # Fallback for UTF-16 files.
+            content = source.read_text(
+                encoding="utf-16"
+            )
 
-    for line_number, raw_line in enumerate(lines, start=1):
-        line = raw_line.split("#", 1)[0].strip()
-        if not line or line.startswith(("-", "git+", "http:", "https:")):
-            continue
+    except (
+        OSError,
+        UnicodeDecodeError,
+    ) as exc:
+        raise ValueError(
+            f"Unable to read {source}: {exc}"
+        ) from exc
 
-        match = _REQUIREMENT_RE.match(line)
-        if not match:
-            continue
+    lines = content.splitlines()
 
-        name, extras, specifier = match.groups()
-        if "@" in name or name.startswith("."):
-            continue
+    for line_number, raw_line in enumerate(
+        lines,
+        start=1,
+    ):
+        dependency = _parse_requirement(
+            raw_line,
+            source,
+            "requirements",
+            line_number,
+        )
 
-        results.append({
-            **_make_dependency(name, specifier, source, "requirements"),
-            "extras": extras[1:-1].split(",") if extras else [],
-            "evidence": {
-                "path": source.as_posix(),
-                "line": line_number,
-            },
-        })
+        if dependency is not None:
+            results.append(dependency)
 
     return results
 
 
-def parse_pyproject(path: str | Path) -> list[dict[str, Any]]:
-    """Parse PEP 621 project dependencies and common Poetry groups."""
+def parse_pyproject(
+    path: str | Path,
+) -> list[dict[str, Any]]:
+    """
+    Parse PEP 621 project dependencies and common
+    Poetry dependency groups.
+    """
+
     source = Path(path)
 
     try:
         with source.open("rb") as file:
             data = tomllib.load(file)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise ValueError(f"Unable to parse {source}: {exc}") from exc
 
-    results = []
+    except (
+        OSError,
+        tomllib.TOMLDecodeError,
+    ) as exc:
+        raise ValueError(
+            f"Unable to parse {source}: {exc}"
+        ) from exc
+
+    results: list[dict[str, Any]] = []
+
+    # ============================================================
+    # PEP 621
+    # ============================================================
+
     project = data.get("project", {})
+
     if isinstance(project, dict):
-        for requirement in project.get("dependencies", []):
-            if not isinstance(requirement, str):
-                continue
-            match = _REQUIREMENT_RE.match(requirement)
-            if match:
-                name, _, specifier = match.groups()
-                results.append(
-                    _make_dependency(name, specifier, source, "project")
+
+        # Standard project dependencies.
+        dependencies = project.get(
+            "dependencies",
+            [],
+        )
+
+        if isinstance(dependencies, list):
+
+            for requirement in dependencies:
+
+                if not isinstance(
+                    requirement,
+                    str,
+                ):
+                    continue
+
+                dependency = _parse_requirement(
+                    requirement,
+                    source,
+                    "project",
                 )
 
-        optional = project.get("optional-dependencies", {})
+                if dependency is not None:
+                    results.append(
+                        dependency
+                    )
+
+        # Optional dependency groups.
+        optional = project.get(
+            "optional-dependencies",
+            {},
+        )
+
         if isinstance(optional, dict):
+
             for group, requirements in optional.items():
-                if not isinstance(requirements, list):
+
+                if not isinstance(
+                    requirements,
+                    list,
+                ):
                     continue
+
                 for requirement in requirements:
-                    if not isinstance(requirement, str):
+
+                    if not isinstance(
+                        requirement,
+                        str,
+                    ):
                         continue
-                    match = _REQUIREMENT_RE.match(requirement)
-                    if match:
-                        name, _, specifier = match.groups()
+
+                    dependency = _parse_requirement(
+                        requirement,
+                        source,
+                        f"optional:{group}",
+                    )
+
+                    if dependency is not None:
                         results.append(
-                            _make_dependency(
-                                name, specifier, source, f"optional:{group}"
-                            )
+                            dependency
                         )
 
-    # Poetry's dependency tables are commonly used in pyproject.toml.
-    poetry = data.get("tool", {}).get("poetry", {})
-    if isinstance(poetry, dict):
-        for group_name, section in (
-            ("poetry", poetry.get("dependencies", {})),
-            ("poetry-dev", poetry.get("dev-dependencies", {})),
-        ):
-            if not isinstance(section, dict):
+    # ============================================================
+    # Poetry
+    # ============================================================
+
+    tool = data.get(
+        "tool",
+        {},
+    )
+
+    if not isinstance(tool, dict):
+        return results
+
+    poetry = tool.get(
+        "poetry",
+        {},
+    )
+
+    if not isinstance(poetry, dict):
+        return results
+
+    poetry_sections = (
+        (
+            "poetry",
+            poetry.get(
+                "dependencies",
+                {},
+            ),
+        ),
+        (
+            "poetry-dev",
+            poetry.get(
+                "dev-dependencies",
+                {},
+            ),
+        ),
+    )
+
+    for dependency_type, section in poetry_sections:
+
+        if not isinstance(section, dict):
+            continue
+
+        for name, value in section.items():
+
+            # Poetry uses "python" for the Python
+            # interpreter constraint.
+            if str(name).lower() == "python":
                 continue
-            for name, value in section.items():
-                if name.lower() == "python":
-                    continue
-                if isinstance(value, str):
-                    specifier = value
-                elif isinstance(value, dict):
-                    specifier = str(value.get("version", ""))
-                else:
-                    continue
-                results.append(
-                    _make_dependency(name, specifier, source, group_name)
+
+            specifier = ""
+
+            if isinstance(value, str):
+                specifier = value
+
+            elif isinstance(value, dict):
+                version = value.get("version")
+
+                if version is not None:
+                    specifier = str(version)
+
+            if (
+                not specifier
+                and not isinstance(
+                    value,
+                    (str, dict),
                 )
+            ):
+                continue
+
+            dependency = _make_dependency(
+                str(name),
+                specifier,
+                source,
+                dependency_type,
+            )
+
+            results.append(
+                dependency
+            )
 
     return results
